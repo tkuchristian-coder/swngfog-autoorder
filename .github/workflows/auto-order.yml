@@ -2,7 +2,7 @@ name: swngfog Auto Order
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # 每15分鐘執行一次
+    - cron: '*/10 * * * *'   # 每10分鐘執行一次
   workflow_dispatch:           # 允許手動觸發（測試用）
 
 jobs:
