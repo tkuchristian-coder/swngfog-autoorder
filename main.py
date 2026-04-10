@@ -188,7 +188,17 @@ def process_orders(dry_run: bool = False):
     print("連接 Google Sheets...")
     gc = get_gspread_client()
     sh = gc.open_by_key(SHEET_ID)
-    ws = sh.worksheet(SHEET_TAB_NAME)
+    try:
+        ws = sh.worksheet(SHEET_TAB_NAME)
+    except Exception as e:
+        available = [w.title for w in sh.worksheets()]
+        msg = f"找不到分頁「{SHEET_TAB_NAME}」，目前可用分頁：{available}"
+        print(f"[錯誤] {msg}")
+        send_alert_email(
+            subject=f"[swngfog] ⚠️ 找不到分頁：{SHEET_TAB_NAME}",
+            body=f"{msg}\n\n請確認 Google Sheet 分頁名稱是否正確，或新增對應月份的分頁。",
+        )
+        return
 
     all_rows = ws.get_all_values()
     print(f"共讀取 {len(all_rows)} 列，從第 {START_ROW} 列開始處理\n")
