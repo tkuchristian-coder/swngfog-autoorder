@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 # swngfog API 設定（支援 GitHub Actions Secrets 注入，本地執行 fallback 硬編碼）
 SWNGFOG_API_KEY = os.environ.get("SWNGFOG_API_KEY", "")
@@ -6,7 +7,7 @@ SWNGFOG_API_URL = "https://www.swngfog.com/api/v1"
 
 # Google Sheet 設定
 SHEET_ID = os.environ.get("SHEET_ID", "1sbYoxrrMOPZsA2q6dPDqzU3OvoWykcsy-4ao9f9oyJk")
-SHEET_TAB_NAME = "2026年3月"  # 目前處理的分頁
+SHEET_TAB_NAME = os.environ.get("SHEET_TAB_NAME", datetime.now().strftime("%Y年%-m月"))
 
 # 從第幾列開始處理（含標題列後的第一行資料是第2列，index從1起算）
 # 使用者執行前請修改此值

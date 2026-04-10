@@ -212,11 +212,17 @@ def process_orders(dry_run: bool = False):
 
         # 跳過：欄位B（服務）或欄位C（連結）任一為空 → 不執行
         if not service_name or not link_raw:
+            if order_no:  # 有訂單號才印，避免空列噪音
+                print(f"[跳過] 列{row_num} 訂單#{order_no}：B欄或C欄為空，跳過")
             continue
 
         # 跳過已完成
-        if status == "完成":
+        if status.strip() == "完成":
             continue
+
+        # status 非空、非「等待處理」、非「完成」→ 印出提示（不跳過，維持原有行為）
+        if status and status.strip() not in ("完成", "等待處理"):
+            print(f"[提示] 列{row_num} 訂單#{order_no}：狀態為「{status}」，非預期值，仍繼續處理")
 
         # ── 人工處理服務 → 寄 email 通知，不自動下單 ───────────
         if service_name in MANUAL_SERVICES:
@@ -277,7 +283,7 @@ def process_orders(dry_run: bool = False):
             continue
 
         if qty <= 0:
-            print(f"[跳過] 列{row_num} 訂單#{order_no} 數量為0")
+            print(f"[跳過] 列{row_num} 訂單#{order_no}：數量為 {qty}，跳過")
             continue
 
         # ── 拆單並下單 ────────────────────────────────────────
@@ -331,7 +337,7 @@ def process_orders(dry_run: bool = False):
                     err_msg = str(e)
                     if "balance" in err_msg.lower():
                         print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_count, batch_count)
+                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, full_batches, batch_count)
                         return
                     print(f"  [失敗] 餘量批次（{remainder}個）：{err_msg}")
                     failed_batches.append(f"餘量批次({remainder}個)：{err_msg}")
