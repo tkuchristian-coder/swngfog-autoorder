@@ -449,9 +449,25 @@ def process_orders(dry_run: bool = False):
 
 if __name__ == "__main__":
     import sys
+    import traceback
 
     dry_run = "--dry-run" in sys.argv
     if dry_run:
         print("=== DRY RUN 模式：只印出，不實際呼叫 API ===\n")
 
-    process_orders(dry_run=dry_run)
+    try:
+        process_orders(dry_run=dry_run)
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"\n[💥 CRASH] 腳本發生未預期錯誤：{e}\n{tb}")
+        send_alert_email(
+            subject=f"[swngfog] 💥 腳本 Crash，請立即檢查",
+            body=(
+                f"自動下單腳本發生未預期錯誤，已中止執行。\n\n"
+                f"=== 錯誤訊息 ===\n{e}\n\n"
+                f"=== 完整 Traceback ===\n{tb}\n\n"
+                f"請檢查 Google Sheet 中狀態為「處理中:X/N」的列，"
+                f"確認下次執行時是否需要手動介入。"
+            ),
+        )
+        raise
