@@ -145,6 +145,21 @@ def extract_igid(raw: str) -> str:
     return raw.lower()
 
 
+def parse_processing_status(status: str):
+    """
+    解析「處理中:X/N」格式
+    回傳 (completed_batches, total_batches)，格式不符則回傳 None
+    """
+    if not status.startswith("處理中:"):
+        return None
+    try:
+        progress = status[len("處理中:"):]
+        x, n = progress.split("/")
+        return int(x), int(n)
+    except Exception:
+        return None
+
+
 def place_order(service_id: int, link: str, quantity: int) -> dict:
     """呼叫 swngfog API 下單"""
     payload = {
@@ -230,8 +245,13 @@ def process_orders(dry_run: bool = False):
         if status.strip() == "完成":
             continue
 
-        # status 非空、非「等待處理」、非「完成」→ 印出提示（不跳過，維持原有行為）
-        if status and status.strip() not in ("完成", "等待處理"):
+        # 解析斷點續跑狀態「處理中:X/N」
+        resume_batch = 0
+        parsed = parse_processing_status(status)
+        if parsed:
+            resume_batch, _ = parsed
+            print(f"[續單] 列{row_num} 訂單#{order_no}：偵測到中斷進度，從第{resume_batch + 1}批繼續")
+        elif status and status.strip() not in ("等待處理",):
             print(f"[提示] 列{row_num} 訂單#{order_no}：狀態為「{status}」，非預期值，仍繼續處理")
 
         # ── 人工處理服務 → 寄 email 通知，不自動下單 ───────────
@@ -303,15 +323,23 @@ def process_orders(dry_run: bool = False):
         remainder   = qty % BATCH_SIZE
         batch_count = full_batches + (1 if remainder else 0)
 
+        resume_info = f"（從第{resume_batch + 1}批繼續）" if resume_batch > 0 else ""
         print(f"[處理] 列{row_num} 訂單#{order_no} | {service_name}(ID:{service_id}) | {igid} | "
-              f"數量:{qty} → {full_batches}批×{BATCH_SIZE}" + (f" + 1批×{remainder}" if remainder else ""))
+              f"數量:{qty} → {full_batches}批×{BATCH_SIZE}" + (f" + 1批×{remainder}" if remainder else "") + resume_info)
 
         total_orders += 1
         order_failed = False
         api_calls_this_order = 0
         failed_batches = []   # 收集本訂單失敗批次，最後一封匯總 email
 
-        for i in range(full_batches):
+        # ── 開始前標記「處理中」，防止並行重複執行 / 支援斷點續跑 ──
+        if not dry_run and resume_batch == 0:
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, f"處理中:0/{batch_count}")
+            except Exception as e:
+                print(f"  [警告] 無法寫入處理中狀態：{e}")
+
+        for i in range(resume_batch, full_batches):
             if dry_run:
                 print(f"  [DRY RUN] service={service_id} link={igid} quantity={BATCH_SIZE}")
                 api_calls_this_order += 1
@@ -321,6 +349,10 @@ def process_orders(dry_run: bool = False):
                     print(f"  [成功] 批次{i+1}/{batch_count} → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
+                    try:
+                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
+                    except Exception as ue:
+                        print(f"  [警告] 無法更新進度：{ue}")
                 except Exception as e:
                     err_msg = str(e)
                     # ── 餘額不足 → 寄信記憶進度 + 停止 cron ──────────
@@ -333,7 +365,7 @@ def process_orders(dry_run: bool = False):
                     order_failed = True
                 time.sleep(1.5)
 
-        if remainder > 0:
+        if remainder > 0 and resume_batch <= full_batches:
             if dry_run:
                 print(f"  [DRY RUN] service={service_id} link={igid} quantity={remainder}")
                 api_calls_this_order += 1
@@ -343,6 +375,10 @@ def process_orders(dry_run: bool = False):
                     print(f"  [成功] 餘量批次({remainder}個) → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
+                    try:
+                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{batch_count}/{batch_count}")
+                    except Exception as ue:
+                        print(f"  [警告] 無法更新進度：{ue}")
                 except Exception as e:
                     err_msg = str(e)
                     if "balance" in err_msg.lower():
@@ -366,17 +402,18 @@ def process_orders(dry_run: bool = False):
                     f"  服務   ：{service_name}（ID:{service_id}）\n"
                     f"  IGID  ：{igid}\n"
                     f"  總批次 ：{batch_count}\n"
-                    f"  成功   ：{api_calls_this_order}\n"
+                    f"  本次成功：{api_calls_this_order}\n"
                     f"  失敗   ：{len(failed_batches)}\n\n"
                     f"=== 失敗明細（前10筆）===\n" +
                     "\n".join(f"  {j+1}. {m}" for j, m in enumerate(failed_batches[:10])) +
                     (f"\n  ...（共 {len(failed_batches)} 筆）" if len(failed_batches) > 10 else "") +
-                    f"\n\n請到 swngfog 確認是否需要手動補單。"
+                    f"\n\nSheet I欄已保留「處理中:{resume_batch + api_calls_this_order}/{batch_count}」，下次執行將自動從斷點繼續。"
                 ),
             )
 
         # ── 全部批次成功 → 回寫 I 欄「完成」，並視需要寫 G 欄「AI下單」─
-        if not order_failed and api_calls_this_order == batch_count:
+        total_successful = resume_batch + api_calls_this_order
+        if not order_failed and total_successful == batch_count:
             if dry_run:
                 print(f"  [DRY RUN] 將列{row_num} I欄更新為「完成」")
                 if row_num >= AI_TAG_START_ROW:
@@ -395,7 +432,7 @@ def process_orders(dry_run: bool = False):
                     except Exception as e:
                         print(f"  [警告] 無法更新 G 欄：{e}")
         elif not order_failed:
-            print(f"  [⚠️ 未標記完成] 列{row_num} 預期{batch_count}批，實際成功{api_calls_this_order}批")
+            print(f"  [⚠️ 未標記完成] 列{row_num} 預期{batch_count}批，實際完成{total_successful}批")
 
     # ── 執行摘要 ──────────────────────────────────────────────
     print(f"\n{'='*50}")
