@@ -1,14 +1,16 @@
 name: swngfog Auto Order
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'   # 每10分鐘執行一次
-  workflow_dispatch:           # 允許手動觸發（測試用）
+  workflow_dispatch:           # 由 cron-job.org 每10分鐘觸發，或手動觸發
+
+concurrency:
+  group: auto-order-run
+  cancel-in-progress: false   # 若上一輪還在執行，新觸發排隊等待（不殺掉進行中的下單）
 
 jobs:
   run-orders:
     runs-on: ubuntu-latest
-    timeout-minutes: 12        # 確保不超時（15分鐘間隔內完成）
+    timeout-minutes: 12        # 確保不超時
 
     steps:
       - name: Checkout
