@@ -13,6 +13,7 @@ import time
 import smtplib
 import requests
 import gspread
+from gspread.exceptions import APIError
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
@@ -193,6 +194,24 @@ def place_order(service_id: int, link: str, quantity: int) -> dict:
 # 主流程
 # ─────────────────────────────────────────────
 
+def gsheet_retry(fn, max_retries=3, base_delay=10):
+    """
+    帶指數退避的 Google Sheets API 重試。
+    處理 503 (Service Unavailable) 和 429 (Rate Limit) 等暫時性錯誤。
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except APIError as e:
+            status = e.response.status_code if hasattr(e, 'response') else 0
+            if status in (429, 500, 502, 503) and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"  [重試] Google API {status} 錯誤，{delay}秒後重試（{attempt+1}/{max_retries}）...")
+                time.sleep(delay)
+            else:
+                raise
+
+
 def process_orders(dry_run: bool = False):
     """
     讀取 Google Sheet，處理「等待處理」訂單。
@@ -202,9 +221,18 @@ def process_orders(dry_run: bool = False):
     """
     print("連接 Google Sheets...")
     gc = get_gspread_client()
-    sh = gc.open_by_key(SHEET_ID)
+    sh = gsheet_retry(lambda: gc.open_by_key(SHEET_ID))
     try:
-        ws = sh.worksheet(SHEET_TAB_NAME)
+        ws = gsheet_retry(lambda: sh.worksheet(SHEET_TAB_NAME))
+    except APIError as e:
+        status = e.response.status_code if hasattr(e, 'response') else '?'
+        msg = f"Google Sheets API 錯誤（HTTP {status}），重試後仍失敗"
+        print(f"[錯誤] {msg}")
+        send_alert_email(
+            subject=f"[swngfog] ⚠️ Google Sheets API 錯誤（{status}）",
+            body=f"{msg}\n\n錯誤詳情：{e}\n\n請稍後再試，Google 服務可能暫時不可用。",
+        )
+        return
     except Exception as e:
         available = [w.title for w in sh.worksheets()]
         msg = f"找不到分頁「{SHEET_TAB_NAME}」，目前可用分頁：{available}"
@@ -215,7 +243,7 @@ def process_orders(dry_run: bool = False):
         )
         return
 
-    all_rows = ws.get_all_values()
+    all_rows = gsheet_retry(lambda: ws.get_all_values())
     print(f"共讀取 {len(all_rows)} 列，從第 {START_ROW} 列開始處理\n")
 
     total_api_calls = 0
