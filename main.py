@@ -21,7 +21,7 @@ import os
 from config import (
     SWNGFOG_API_KEY, SWNGFOG_API_URL,
     SHEET_ID, SHEET_TAB_NAME,
-    START_ROW, SERVICE_MAP, MANUAL_SERVICES,
+    START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS,
     COL_ORDER_NO, COL_SERVICE, COL_LINK, COL_QTY, COL_AI_TAG, COL_STATUS,
     BATCH_SIZE, AI_TAG_START_ROW,
     ALERT_EMAIL_TO, ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD,
@@ -271,6 +271,20 @@ def process_orders(dry_run: bool = False):
 
         # 跳過已完成
         if status.strip() == "完成":
+            continue
+
+        # ── 跳過名單：C 欄（IGID/連結）命中 SKIP_LINKS → 直接標記完成，不送 swngfog ──
+        skip_set_lower = {s.strip().lower() for s in SKIP_LINKS}
+        if link_raw.strip().lower() in skip_set_lower:
+            print(f"[跳過名單] 列{row_num} 訂單#{order_no}：IGID「{link_raw}」在 SKIP_LINKS，直接標記完成")
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, "完成")
+                print(f"  [✓] 已標記列{row_num} I欄為「完成」")
+                if row_num >= AI_TAG_START_ROW:
+                    ws.update_cell(row_num, COL_AI_TAG + 1, "AI下單")
+                    print(f"  [✓] 已標記列{row_num} G欄為「AI下單」")
+            except Exception as e:
+                print(f"  [警告] 寫入跳過名單完成標記失敗：{e}")
             continue
 
         # 解析斷點續跑狀態「處理中:X/N」

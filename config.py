@@ -31,6 +31,12 @@ SERVICE_MAP = {
     "普通台灣讚":       7,
 }
 
+# ── 跳過名單：C 欄（IGID/連結）命中時直接標記完成，不送 swngfog ──
+# 比對方式：case-insensitive 完全相符（去除前後空白）
+SKIP_LINKS = {
+    "c.chienc",
+}
+
 # ── 人工處理：遇到這些服務改寄 email，不自動下單 ────────────
 # Email 內容會告知服務名稱、IGID、數量，請手動安排
 MANUAL_SERVICES = {
