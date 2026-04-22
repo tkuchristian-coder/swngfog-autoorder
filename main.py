@@ -273,6 +273,11 @@ def process_orders(dry_run: bool = False):
         if status.strip() == "完成":
             continue
 
+        # 跳過已通知人工（避免每輪重複寄 email）
+        # 等實際完成後人工把 I 欄改成「完成」即可
+        if status.strip() == "已通知人工":
+            continue
+
         # ── 跳過名單：C 欄（IGID/連結）命中 SKIP_LINKS → 直接標記完成，不送 swngfog ──
         skip_set_lower = {s.strip().lower() for s in SKIP_LINKS}
         if link_raw.strip().lower() in skip_set_lower:
@@ -310,9 +315,17 @@ def process_orders(dry_run: bool = False):
                     f"  服務   ：{service_name}\n"
                     f"  IGID  ：{link_raw}\n"
                     f"  數量   ：{qty_raw}\n\n"
-                    f"此服務尚未設定自動下單，請手動處理。"
+                    f"此服務尚未設定自動下單，請手動處理。\n\n"
+                    f"提示：腳本已將 I 欄標記為「已通知人工」，下次掃描不會再寄 email。\n"
+                    f"      你手動處理完後，請把 I 欄改成「完成」。"
                 ),
             )
+            # 標記 I 欄為「已通知人工」，避免下輪重複寄 email
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, "已通知人工")
+                print(f"  [✓] 已標記列{row_num} I欄為「已通知人工」(下次掃描不再寄 email)")
+            except Exception as e:
+                print(f"  [警告] 寫入「已通知人工」標記失敗：{e}")
             continue
 
         # ── 完全未知服務名稱 → 寄 email 警告 ──────────────────
