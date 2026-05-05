@@ -342,9 +342,17 @@ def process_orders(dry_run: bool = False):
                     f"  服務   ：{service_name}\n"
                     f"  IGID  ：{link_raw}\n"
                     f"  數量   ：{qty_raw}\n\n"
-                    f"請在 config.py 的 SERVICE_MAP 或 MANUAL_SERVICES 新增此服務名稱。"
+                    f"請在 config.py 的 SERVICE_MAP 或 MANUAL_SERVICES 新增此服務名稱。\n\n"
+                    f"提示：腳本已將 I 欄標記為「已通知人工」，下次掃描不會再寄 email。\n"
+                    f"      修正服務名稱或在 config.py 加入後，請把 I 欄改回空白或「等待處理」。"
                 ),
             )
+            # 標記 I 欄為「已通知人工」，避免下輪重複寄 email
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, "已通知人工")
+                print(f"  [✓] 已標記列{row_num} I欄為「已通知人工」(下次掃描不再寄 email)")
+            except Exception as e:
+                print(f"  [警告] 寫入「已通知人工」標記失敗：{e}")
             continue
 
         # ── 數量驗證 ──────────────────────────────────────────
