@@ -1,0 +1,30 @@
+name: Cancel by Row / IGID
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '列號（如 2902）或 IGID/連結關鍵字（如 DZGsIvQyBNo / b_moooooo）'
+        required: true
+        type: string
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Decode credentials.json
+        run: |
+          echo "${{ secrets.GOOGLE_CREDENTIALS }}" | base64 --decode > credentials.json
+      - name: Cancel
+        env:
+          SWNGFOG_API_KEY: ${{ secrets.SWNGFOG_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ github.event.inputs.target }}
+        run: python cancel_by_row.py
