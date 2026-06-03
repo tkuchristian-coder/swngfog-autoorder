@@ -1,0 +1,24 @@
+name: Cancel swngfog Orders
+
+on:
+  workflow_dispatch:
+    inputs:
+      oids:
+        description: 'OIDs (逗號或空白分隔)'
+        required: true
+        type: string
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run cancel script
+        env:
+          SWNGFOG_API_KEY: ${{ secrets.SWNGFOG_API_KEY }}
+          OIDS: ${{ github.event.inputs.oids }}
+        run: python cancel_active.py
