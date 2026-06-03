@@ -2,7 +2,7 @@
 Cancel active swngfog orders.
 讀環境變數 OIDS（逗號分隔），先查 status，只 cancel 還是 active 的。
 """
-import os, sys, json, urllib.request, urllib.parse
+import os, sys, json, time, urllib.request, urllib.parse
 
 API_KEY = os.environ["SWNGFOG_API_KEY"]
 API_URL = "https://www.swngfog.com/api/v1"
@@ -13,25 +13,31 @@ if not oids_str:
 oids = [int(x) for x in oids_str.replace(",", " ").split() if x.strip()]
 print(f"輸入 {len(oids)} 個 OID\n")
 
-# 查 status（單筆查避免 batch 行為差異）
 ACTIVE = {"in progress", "pending", "processing"}
 active, terminated = [], []
 
-# 改用 batch status (orders=...)
-r = urllib.request.Request(API_URL, data=urllib.parse.urlencode({
-    "key": API_KEY, "action": "status", "orders": ",".join(str(o) for o in oids)
-}).encode())
-try:
-    d = json.loads(urllib.request.urlopen(r, timeout=30).read())
-except Exception as e:
-    print(f"status 查詢失敗: {e}"); sys.exit(1)
+def query_status_single(oid):
+    """單筆 status 查詢，避開 batch 403。"""
+    r = urllib.request.Request(API_URL, data=urllib.parse.urlencode({
+        "key": API_KEY, "action": "status", "order": str(oid)
+    }).encode())
+    return json.loads(urllib.request.urlopen(r, timeout=20).read())
 
-for k, v in d.items():
-    s = (v.get("status") or "").lower() if isinstance(v, dict) else ""
-    if s in ACTIVE:
-        active.append((int(k), v.get("status"), v.get("remains", "?")))
-    else:
-        terminated.append((int(k), v.get("status", "?")))
+print(f"逐筆查 status ({len(oids)} 筆)…")
+for i, oid in enumerate(oids):
+    try:
+        v = query_status_single(oid)
+        s = (v.get("status") or "").lower() if isinstance(v, dict) else ""
+        if s in ACTIVE:
+            active.append((oid, v.get("status"), v.get("remains", "?")))
+        else:
+            terminated.append((oid, v.get("status", "?")))
+    except Exception as e:
+        print(f"  ⚠️ {oid} status 失敗: {e}")
+        terminated.append((oid, f"ERROR:{e}"))
+    if (i+1) % 10 == 0:
+        print(f"  進度 {i+1}/{len(oids)}")
+    time.sleep(0.2)
 
 print(f"=== 狀態統計 ===")
 print(f"active : {len(active)} 筆")
@@ -51,23 +57,29 @@ if not active:
     print("\n✅ 沒有 active 訂單需要 cancel，結束")
     sys.exit(0)
 
-# Cancel active
+# Cancel active（先試 batch，失敗則改逐筆）
 active_oids = [o for o, _, _ in active]
 print(f"\n=== 開始 cancel {len(active_oids)} 筆 ===")
-r = urllib.request.Request(API_URL, data=urllib.parse.urlencode({
-    "key": API_KEY, "action": "cancel", "orders": ",".join(str(o) for o in active_oids)
-}).encode())
 try:
+    r = urllib.request.Request(API_URL, data=urllib.parse.urlencode({
+        "key": API_KEY, "action": "cancel", "orders": ",".join(str(o) for o in active_oids)
+    }).encode())
     result = json.loads(urllib.request.urlopen(r, timeout=60).read())
-    print(f"\n=== Cancel 結果 ===")
-    if isinstance(result, list):
-        for item in result:
-            print(f"  {item}")
-    elif isinstance(result, dict):
-        for k, v in result.items():
-            print(f"  {k}: {v}")
-    else:
-        print(result)
+    print(f"batch cancel 結果：")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 except Exception as e:
-    print(f"cancel 失敗: {e}")
-    sys.exit(1)
+    print(f"batch cancel 失敗 ({e})，改逐筆…")
+    ok = fail = 0
+    for oid in active_oids:
+        try:
+            r = urllib.request.Request(API_URL, data=urllib.parse.urlencode({
+                "key": API_KEY, "action": "cancel", "order": str(oid)
+            }).encode())
+            res = json.loads(urllib.request.urlopen(r, timeout=20).read())
+            print(f"  {oid}: {res}")
+            ok += 1
+        except Exception as ee:
+            print(f"  {oid}: ❌ {ee}")
+            fail += 1
+        time.sleep(0.2)
+    print(f"\n逐筆 cancel: ✅{ok} ❌{fail}")
