@@ -63,8 +63,13 @@ def send_alert_email(subject: str, body: str):
 # 餘額不足：寄信記錄進度 + 停止 cron
 # ─────────────────────────────────────────────
 
-def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total):
-    """偵測到餘額不足時：寄信告知進度，並停用 cron job"""
+def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total, ws=None):
+    """偵測到餘額不足時：寄信告知進度，並停用 cron job
+
+    寄信去重：使用 H 欄(col 8) 當計數器，同一列最多寄 2 封 email。
+    充值恢復後，該列繼續處理成功會覆蓋 I 欄為「完成」；
+    若要重置計數器，可手動清空 H 欄。
+    """
     import subprocess
     from datetime import datetime
 
@@ -72,7 +77,37 @@ def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done,
     remaining_qty = qty - done_qty
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # 1. 寄 email
+    # ── 檢查 email 計數器（H 欄 = col 8）──
+    MAX_EMAILS = 2
+    email_col = 8  # H
+    should_email = True
+    new_count = 1
+    if ws is not None:
+        try:
+            current = ws.cell(row_num, email_col).value
+            try:
+                sent_count = int(current) if current else 0
+            except (ValueError, TypeError):
+                sent_count = 0
+            if sent_count >= MAX_EMAILS:
+                should_email = False
+                print(f"  [⛔ 餘額不足] 列{row_num} 已寄 {sent_count} 封 email（>={MAX_EMAILS}），不再寄")
+            else:
+                new_count = sent_count + 1
+        except Exception as e:
+            print(f"  [警告] 讀 H 欄 email 計數失敗：{e}")
+
+    # 1. 寄 email（若未超過上限）
+    if not should_email:
+        try:
+            subprocess.run(
+                "crontab -l 2>/dev/null | grep -v 'Gsheet_to_fog/run.sh' | crontab -",
+                shell=True, capture_output=True, text=True
+            )
+        except Exception:
+            pass
+        return
+
     send_alert_email(
         subject=f"[swngfog] ⛔ 餘額不足，自動暫停（{timestamp}）",
         body=(
@@ -105,7 +140,14 @@ def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done,
     except Exception as e:
         print(f"  [警告] 停用 cron 失敗：{e}")
 
-    print(f"  [⛔] 已寄送進度 email，腳本暫停")
+    # 寫回 H 欄 email 計數
+    if ws is not None:
+        try:
+            ws.update_cell(row_num, email_col, str(new_count))
+        except Exception as e:
+            print(f"  [警告] 寫入 H 欄 email 計數失敗：{e}")
+
+    print(f"  [⛔] 已寄送進度 email（第 {new_count}/{MAX_EMAILS} 封），腳本暫停")
 
 
 # ─────────────────────────────────────────────
@@ -421,7 +463,7 @@ def process_orders(dry_run: bool = False):
                     # ── 餘額不足 → 寄信記憶進度 + 停止 cron ──────────
                     if "balance" in err_msg.lower():
                         print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count)
+                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count, ws=ws)
                         return  # 立即中止整個流程
                     print(f"  [失敗] 批次{i+1}/{batch_count}：{err_msg}")
                     failed_batches.append(f"批次{i+1}/{batch_count}：{err_msg}")
@@ -446,7 +488,7 @@ def process_orders(dry_run: bool = False):
                     err_msg = str(e)
                     if "balance" in err_msg.lower():
                         print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, full_batches, batch_count)
+                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, full_batches, batch_count, ws=ws)
                         return
                     print(f"  [失敗] 餘量批次（{remainder}個）：{err_msg}")
                     failed_batches.append(f"餘量批次({remainder}個)：{err_msg}")
