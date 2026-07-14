@@ -315,6 +315,10 @@ def process_orders(dry_run: bool = False):
         if status.strip() == "完成":
             continue
 
+        # 跳過手動標記「進行中」的列（人工暫停用途，不要碰）
+        if status.strip() == "進行中":
+            continue
+
         # 跳過已通知人工（避免每輪重複寄 email）
         # 等實際完成後人工把 I 欄改成「完成」即可
         if status.strip() == "已通知人工":
