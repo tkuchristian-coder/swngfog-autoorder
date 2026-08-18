@@ -458,12 +458,19 @@ def process_orders(dry_run: bool = False):
                     print(f"  [成功] 批次{i+1}/{batch_count} → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
-                    try:
-                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
-                    except Exception as ue:
-                        print(f"  [警告] 無法更新進度：{ue}")
+                    # 節流：每 5 批才寫 sheet 一次（減少 API 呼叫），最後一批必寫
+                    if (i + 1) % 5 == 0 or (i + 1) == batch_count:
+                        try:
+                            ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
+                        except Exception as ue:
+                            print(f"  [警告] 無法更新進度：{ue}")
                 except Exception as e:
                     err_msg = str(e)
+                    # 錯誤發生時，把當下真實進度寫回 sheet 以利 resume
+                    try:
+                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i}/{batch_count}")
+                    except Exception:
+                        pass
                     # ── 餘額不足 → 寄信記憶進度 + 停止 cron ──────────
                     if "balance" in err_msg.lower():
                         print(f"  [⛔ 餘額不足] 停止所有活動")
@@ -472,7 +479,7 @@ def process_orders(dry_run: bool = False):
                     print(f"  [失敗] 批次{i+1}/{batch_count}：{err_msg}")
                     failed_batches.append(f"批次{i+1}/{batch_count}：{err_msg}")
                     order_failed = True
-                time.sleep(1.5)
+                time.sleep(0.5)
 
         if remainder > 0 and resume_batch <= full_batches:
             if dry_run:
@@ -497,7 +504,7 @@ def process_orders(dry_run: bool = False):
                     print(f"  [失敗] 餘量批次（{remainder}個）：{err_msg}")
                     failed_batches.append(f"餘量批次({remainder}個)：{err_msg}")
                     order_failed = True
-                time.sleep(1.5)
+                time.sleep(0.5)
 
         # ── 部分/全部失敗 → 一封匯總 email ──────────────────────
         if order_failed and failed_batches:

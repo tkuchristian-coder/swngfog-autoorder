@@ -10,7 +10,7 @@ concurrency:
 jobs:
   run-orders:
     runs-on: ubuntu-latest
-    timeout-minutes: 12        # 確保不超時
+    timeout-minutes: 30        # 每 10 分鐘會有下一輪，30 分足夠讓大 backlog 一輪清多筆
 
     steps:
       - name: Checkout
