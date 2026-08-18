@@ -11,7 +11,7 @@ SHEET_TAB_NAME = os.environ.get("SHEET_TAB_NAME", "2026年3月")
 
 # 從第幾列開始處理（含標題列後的第一行資料是第2列，index從1起算）
 # 使用者執行前請修改此值
-START_ROW = 778  # 行778以前不動
+START_ROW = 5773  # 5773 以前不動（人工/舊系統已處理）
 
 # ── 自動下單：服務名稱 → swngfog server ID ──────────────────
 SERVICE_MAP = {
