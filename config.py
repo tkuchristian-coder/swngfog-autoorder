@@ -31,6 +31,10 @@ SERVICE_MAP = {
     "普通台灣讚":       7,
 }
 
+# ── 白名單：只處理這些服務類別，其餘全部靜默跳過 ──
+# 空集合 () 或 None 表示不啟用白名單（走原本 SERVICE_MAP / MANUAL_SERVICES 邏輯）
+ALLOWED_SERVICES = {"普通台灣粉"}
+
 # ── 跳過名單：C 欄（IGID/連結）命中時直接標記完成，不送 swngfog ──
 # 比對方式：case-insensitive 完全相符（去除前後空白）
 SKIP_LINKS = {

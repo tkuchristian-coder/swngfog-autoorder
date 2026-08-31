@@ -21,7 +21,7 @@ import os
 from config import (
     SWNGFOG_API_KEY, SWNGFOG_API_URL,
     SHEET_ID, SHEET_TAB_NAME,
-    START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS,
+    START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS, ALLOWED_SERVICES,
     COL_ORDER_NO, COL_SERVICE, COL_LINK, COL_QTY, COL_AI_TAG, COL_STATUS,
     BATCH_SIZE, AI_TAG_START_ROW,
     ALERT_EMAIL_TO, ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD,
@@ -322,6 +322,10 @@ def process_orders(dry_run: bool = False):
         # 跳過已通知人工（避免每輪重複寄 email）
         # 等實際完成後人工把 I 欄改成「完成」即可
         if status.strip() == "已通知人工":
+            continue
+
+        # 白名單過濾：只處理 ALLOWED_SERVICES 內的服務，其餘靜默跳過（不寄 email）
+        if ALLOWED_SERVICES and service_name not in ALLOWED_SERVICES:
             continue
 
         # ── 跳過名單：C 欄（IGID/連結）命中 SKIP_LINKS → 直接標記完成，不送 swngfog ──
