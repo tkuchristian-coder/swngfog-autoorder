@@ -21,7 +21,7 @@ import os
 from config import (
     SWNGFOG_API_KEY, SWNGFOG_API_URL,
     SHEET_ID, SHEET_TAB_NAME,
-    START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS, ALLOWED_SERVICES,
+    START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS, ALLOWED_SERVICES, SERVICE_BATCH_SIZE,
     COL_ORDER_NO, COL_SERVICE, COL_LINK, COL_QTY, COL_AI_TAG, COL_STATUS,
     BATCH_SIZE, AI_TAG_START_ROW,
     ALERT_EMAIL_TO, ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD,
@@ -63,7 +63,7 @@ def send_alert_email(subject: str, body: str):
 # 餘額不足：寄信記錄進度 + 停止 cron
 # ─────────────────────────────────────────────
 
-def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total, ws=None):
+def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total, ws=None, batch_size=None):
     """偵測到餘額不足時：寄信告知進度，並停用 cron job
 
     寄信去重：使用 H 欄(col 8) 當計數器，同一列最多寄 2 封 email。
@@ -73,7 +73,7 @@ def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done,
     import subprocess
     from datetime import datetime
 
-    done_qty = batch_done * BATCH_SIZE
+    done_qty = batch_done * (batch_size if batch_size else BATCH_SIZE)
     remaining_qty = qty - done_qty
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -432,13 +432,14 @@ def process_orders(dry_run: bool = False):
         # ── 拆單並下單 ────────────────────────────────────────
         service_id  = SERVICE_MAP[service_name]
         igid        = extract_igid(link_raw)
-        full_batches = qty // BATCH_SIZE
-        remainder   = qty % BATCH_SIZE
+        batch_size  = SERVICE_BATCH_SIZE.get(service_name, BATCH_SIZE)
+        full_batches = qty // batch_size
+        remainder   = qty % batch_size
         batch_count = full_batches + (1 if remainder else 0)
 
         resume_info = f"（從第{resume_batch + 1}批繼續）" if resume_batch > 0 else ""
         print(f"[處理] 列{row_num} 訂單#{order_no} | {service_name}(ID:{service_id}) | {igid} | "
-              f"數量:{qty} → {full_batches}批×{BATCH_SIZE}" + (f" + 1批×{remainder}" if remainder else "") + resume_info)
+              f"數量:{qty} → {full_batches}批×{batch_size}" + (f" + 1批×{remainder}" if remainder else "") + resume_info)
 
         total_orders += 1
         order_failed = False
@@ -454,11 +455,11 @@ def process_orders(dry_run: bool = False):
 
         for i in range(resume_batch, full_batches):
             if dry_run:
-                print(f"  [DRY RUN] service={service_id} link={igid} quantity={BATCH_SIZE}")
+                print(f"  [DRY RUN] service={service_id} link={igid} quantity={batch_size}")
                 api_calls_this_order += 1
             else:
                 try:
-                    result = place_order(service_id, igid, BATCH_SIZE)
+                    result = place_order(service_id, igid, batch_size)
                     print(f"  [成功] 批次{i+1}/{batch_count} → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
@@ -478,7 +479,7 @@ def process_orders(dry_run: bool = False):
                     # ── 餘額不足 → 寄信記憶進度 + 停止 cron ──────────
                     if "balance" in err_msg.lower():
                         print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count, ws=ws)
+                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count, ws=ws, batch_size=batch_size)
                         return  # 立即中止整個流程
                     print(f"  [失敗] 批次{i+1}/{batch_count}：{err_msg}")
                     failed_batches.append(f"批次{i+1}/{batch_count}：{err_msg}")

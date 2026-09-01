@@ -11,7 +11,7 @@ SHEET_TAB_NAME = os.environ.get("SHEET_TAB_NAME", "2026年3月")
 
 # 從第幾列開始處理（含標題列後的第一行資料是第2列，index從1起算）
 # 使用者執行前請修改此值
-START_ROW = 5773  # 5773 以前不動（人工/舊系統已處理）
+START_ROW = 6400  # 6400 以前不動（人工/舊系統已處理）
 
 # ── 自動下單：服務名稱 → swngfog server ID ──────────────────
 SERVICE_MAP = {
@@ -33,7 +33,15 @@ SERVICE_MAP = {
 
 # ── 白名單：只處理這些服務類別，其餘全部靜默跳過 ──
 # 空集合 () 或 None 表示不啟用白名單（走原本 SERVICE_MAP / MANUAL_SERVICES 邏輯）
-ALLOWED_SERVICES = {"普通台灣粉"}
+ALLOWED_SERVICES = {"普通台灣粉", "台灣讚", "台灣自動讚", "台港華人讚"}
+
+# ── 每服務下單單位（override 預設 BATCH_SIZE）──
+# 未列出的服務走 BATCH_SIZE 預設值
+SERVICE_BATCH_SIZE = {
+    "台灣讚": 2,
+    "台灣自動讚": 2,
+    "台港華人讚": 2,
+}
 
 # ── 跳過名單：C 欄（IGID/連結）命中時直接標記完成，不送 swngfog ──
 # 比對方式：case-insensitive 完全相符（去除前後空白）
