@@ -484,7 +484,7 @@ def process_orders(dry_run: bool = False):
                     print(f"  [失敗] 批次{i+1}/{batch_count}：{err_msg}")
                     failed_batches.append(f"批次{i+1}/{batch_count}：{err_msg}")
                     order_failed = True
-                time.sleep(0.5)
+                time.sleep(0.2)
 
         if remainder > 0 and resume_batch <= full_batches:
             if dry_run:
@@ -509,7 +509,7 @@ def process_orders(dry_run: bool = False):
                     print(f"  [失敗] 餘量批次（{remainder}個）：{err_msg}")
                     failed_batches.append(f"餘量批次({remainder}個)：{err_msg}")
                     order_failed = True
-                time.sleep(0.5)
+                time.sleep(0.2)
 
         # ── 部分/全部失敗 → 一封匯總 email ──────────────────────
         if order_failed and failed_batches:
