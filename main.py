@@ -430,16 +430,47 @@ def process_orders(dry_run: bool = False):
             continue
 
         # ── 拆單並下單 ────────────────────────────────────────
+        # 規則：batch_size 同時作為最低單位（min quantity）。
+        # 餘量 < batch_size 時併入最後一批，避免 API 拒收（例如 55 拆成 10,10,10,10,15）。
         service_id  = SERVICE_MAP[service_name]
         igid        = extract_igid(link_raw)
         batch_size  = SERVICE_BATCH_SIZE.get(service_name, BATCH_SIZE)
+
+        # 數量小於最低單位無法下單
+        if qty < batch_size:
+            msg = f"[數量不足] 列{row_num} 訂單#{order_no}：數量 {qty} < 最低單位 {batch_size}，跳過"
+            print(msg)
+            errors.append(msg)
+            send_alert_email(
+                subject=f"[swngfog] 數量不足最低單位：訂單#{order_no}",
+                body=(
+                    f"自動下單腳本遇到數量小於最低單位：\n\n"
+                    f"  列號     ：{row_num}\n"
+                    f"  訂單號   ：{order_no}\n"
+                    f"  服務     ：{service_name}\n"
+                    f"  數量     ：{qty}\n"
+                    f"  最低單位 ：{batch_size}\n\n"
+                    f"請手動處理或補足數量後改回「等待處理」。"
+                ),
+            )
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, "已通知人工")
+            except Exception:
+                pass
+            continue
+
         full_batches = qty // batch_size
         remainder   = qty % batch_size
-        batch_count = full_batches + (1 if remainder else 0)
+        batches = [batch_size] * full_batches
+        if remainder > 0:
+            # remainder < batch_size 一定成立（否則 % 已 = 0），併入最後一批
+            batches[-1] += remainder
+        batch_count = len(batches)
 
         resume_info = f"（從第{resume_batch + 1}批繼續）" if resume_batch > 0 else ""
+        breakdown = f"{full_batches}批×{batch_size}" + (f"（最後1批={batches[-1]}）" if remainder else "")
         print(f"[處理] 列{row_num} 訂單#{order_no} | {service_name}(ID:{service_id}) | {igid} | "
-              f"數量:{qty} → {full_batches}批×{batch_size}" + (f" + 1批×{remainder}" if remainder else "") + resume_info)
+              f"數量:{qty} → {breakdown}" + resume_info)
 
         total_orders += 1
         order_failed = False
@@ -453,14 +484,15 @@ def process_orders(dry_run: bool = False):
             except Exception as e:
                 print(f"  [警告] 無法寫入處理中狀態：{e}")
 
-        for i in range(resume_batch, full_batches):
+        for i in range(resume_batch, batch_count):
+            q_this = batches[i]
             if dry_run:
-                print(f"  [DRY RUN] service={service_id} link={igid} quantity={batch_size}")
+                print(f"  [DRY RUN] service={service_id} link={igid} quantity={q_this}")
                 api_calls_this_order += 1
             else:
                 try:
-                    result = place_order(service_id, igid, batch_size)
-                    print(f"  [成功] 批次{i+1}/{batch_count} → fog訂單ID:{result.get('order','?')}")
+                    result = place_order(service_id, igid, q_this)
+                    print(f"  [成功] 批次{i+1}/{batch_count}（數量:{q_this}） → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
                     # 節流：每 5 批才寫 sheet 一次（減少 API 呼叫），最後一批必寫
@@ -481,33 +513,8 @@ def process_orders(dry_run: bool = False):
                         print(f"  [⛔ 餘額不足] 停止所有活動")
                         pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count, ws=ws, batch_size=batch_size)
                         return  # 立即中止整個流程
-                    print(f"  [失敗] 批次{i+1}/{batch_count}：{err_msg}")
-                    failed_batches.append(f"批次{i+1}/{batch_count}：{err_msg}")
-                    order_failed = True
-                time.sleep(0.2)
-
-        if remainder > 0 and resume_batch <= full_batches:
-            if dry_run:
-                print(f"  [DRY RUN] service={service_id} link={igid} quantity={remainder}")
-                api_calls_this_order += 1
-            else:
-                try:
-                    result = place_order(service_id, igid, remainder)
-                    print(f"  [成功] 餘量批次({remainder}個) → fog訂單ID:{result.get('order','?')}")
-                    total_api_calls += 1
-                    api_calls_this_order += 1
-                    try:
-                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{batch_count}/{batch_count}")
-                    except Exception as ue:
-                        print(f"  [警告] 無法更新進度：{ue}")
-                except Exception as e:
-                    err_msg = str(e)
-                    if "balance" in err_msg.lower():
-                        print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, full_batches, batch_count, ws=ws)
-                        return
-                    print(f"  [失敗] 餘量批次（{remainder}個）：{err_msg}")
-                    failed_batches.append(f"餘量批次({remainder}個)：{err_msg}")
+                    print(f"  [失敗] 批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg}")
+                    failed_batches.append(f"批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg}")
                     order_failed = True
                 time.sleep(0.2)
 
