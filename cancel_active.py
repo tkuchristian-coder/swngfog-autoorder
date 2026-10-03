@@ -33,8 +33,9 @@ for i, oid in enumerate(oids):
         else:
             terminated.append((oid, v.get("status", "?")))
     except Exception as e:
-        print(f"  ⚠️ {oid} status 失敗: {e}")
-        terminated.append((oid, f"ERROR:{e}"))
+        # status 查不到（例如 swngfog 擋 IP 回 403）時，保守假設 active 以便 cancel
+        print(f"  ⚠️ {oid} status 失敗: {e} → 當 active 嘗試 cancel")
+        active.append((oid, "unknown", "?"))
     if (i+1) % 10 == 0:
         print(f"  進度 {i+1}/{len(oids)}")
     time.sleep(0.2)
