@@ -324,7 +324,34 @@ def process_orders(dry_run: bool = False):
         if status.strip() == "已通知人工":
             continue
 
-        # 白名單過濾：只處理 ALLOWED_SERVICES 內的服務，其餘靜默跳過（不寄 email）
+        # ── 讚類服務全部改寄 email,不自動下單 ───────────────────
+        # 比對規則:服務名稱含「讚」字就改寄 email(涵蓋 台灣讚/台灣自動讚/真人讚/台港華人讚/頂級讚…)
+        # 必須在白名單過濾前,避免被靜默跳過
+        if "讚" in service_name:
+            msg = f"[讚類改寄 email] 列{row_num} 訂單#{order_no}:{service_name} × {qty_raw}"
+            print(msg)
+            errors.append(msg)
+            send_alert_email(
+                subject=f"[swngfog] 需要安排(讚類):{service_name} × {qty_raw}(訂單#{order_no})",
+                body=(
+                    f"以下讚類訂單已改為人工安排,不會自動呼叫 swngfog:\n\n"
+                    f"  列號   :{row_num}\n"
+                    f"  訂單號 :{order_no}\n"
+                    f"  服務   :{service_name}\n"
+                    f"  IGID  :{link_raw}\n"
+                    f"  數量   :{qty_raw}\n\n"
+                    f"提示:腳本已將 I 欄標記為「已通知人工」,下次掃描不會再寄 email。\n"
+                    f"      手動處理完後請把 I 欄改成「完成」。"
+                ),
+            )
+            try:
+                ws.update_cell(row_num, COL_STATUS + 1, "已通知人工")
+                print(f"  [✓] 已標記列{row_num} I欄為「已通知人工」")
+            except Exception as e:
+                print(f"  [警告] 寫入「已通知人工」標記失敗:{e}")
+            continue
+
+        # 白名單過濾:只處理 ALLOWED_SERVICES 內的服務,其餘靜默跳過(不寄 email)
         if ALLOWED_SERVICES and service_name not in ALLOWED_SERVICES:
             continue
 
