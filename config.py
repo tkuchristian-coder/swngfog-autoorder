@@ -18,6 +18,7 @@ SERVICE_MAP = {
     # 粉絲類 (ID 3)
     "普通台灣粉":   3,
     "台港華人":     3,
+    "快速台灣粉":   3,
 
     # 讚類 (ID 7) — 最低下單單位 = 10（swngfog 新規則）
     "台灣讚":           7,
@@ -33,7 +34,7 @@ SERVICE_MAP = {
 
 # ── 白名單：只處理這些服務類別，其餘全部靜默跳過 ──
 # 空集合 () 或 None 表示不啟用白名單（走原本 SERVICE_MAP / MANUAL_SERVICES 邏輯）
-ALLOWED_SERVICES = {"普通台灣粉", "台灣讚", "台灣自動讚", "台港華人讚"}
+ALLOWED_SERVICES = {"普通台灣粉", "快速台灣粉", "台灣讚", "台灣自動讚", "台港華人讚"}
 
 # ── 每服務下單單位（override 預設 BATCH_SIZE）──
 # 未列出的服務走 BATCH_SIZE 預設值
