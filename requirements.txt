@@ -2,3 +2,6 @@ gspread
 google-auth
 google-auth-oauthlib
 requests
+fastapi
+uvicorn[standard]
+python-telegram-bot>=21
