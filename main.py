@@ -601,16 +601,23 @@ def process_orders(dry_run: bool = False):
                             print(f"  [警告] 無法更新進度：{ue}")
                 except Exception as e:
                     err_msg = str(e)
-                    # 錯誤發生時，把當下真實進度寫回 sheet 以利 resume
+                    # ── 餘額不足 → 悲觀處理防重複下單 ──────────────────
+                    # 關鍵:swngfog 可能回 success:false 但實際已 CREATE 訂單(常見 bug)。
+                    # 若寫 i (未算成功),下輪 resume 會從 i+1 重試,導致重複下單。
+                    # 改寫 i+1 (當作已下),犧牲最多 10 粉 coverage,換不會重複下單。
+                    if "balance" in err_msg.lower():
+                        try:
+                            ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
+                        except Exception:
+                            pass
+                        print(f"  [⛔ 餘額不足] 批次{i+1} 可能已下單,寫進度 {i+1}/{batch_count} 避免重複,停止所有活動")
+                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i+1, batch_count, ws=ws, batch_size=batch_size)
+                        return  # 立即中止整個流程
+                    # ── 其他錯誤(非 balance) → 寫 i (未算成功),可 resume 重試 ──
                     try:
                         ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i}/{batch_count}")
                     except Exception:
                         pass
-                    # ── 餘額不足 → 寄信記憶進度 + 停止 cron ──────────
-                    if "balance" in err_msg.lower():
-                        print(f"  [⛔ 餘額不足] 停止所有活動")
-                        pause_due_to_balance(row_num, order_no, service_name, igid, qty, i, batch_count, ws=ws, batch_size=batch_size)
-                        return  # 立即中止整個流程
                     print(f"  [失敗] 批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg}")
                     failed_batches.append(f"批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg}")
                     order_failed = True
