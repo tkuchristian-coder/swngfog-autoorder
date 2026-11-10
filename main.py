@@ -9,8 +9,12 @@ Google Sheet → swngfog 自動下單腳本
 """
 
 import re
+import sys
 import time
+import signal
+import atexit
 import smtplib
+import subprocess
 import requests
 import gspread
 from gspread.exceptions import APIError
@@ -28,6 +32,43 @@ from config import (
 )
 
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
+PAUSE_FLAG_FILE  = os.path.join(os.path.dirname(__file__), ".paused")
+
+
+# ─────────────────────────────────────────────
+# SIGTERM-safe 進度 flush
+# ─────────────────────────────────────────────
+# GitHub Actions cancel 會先送 SIGTERM 給 10 秒 grace 期再 SIGKILL。
+# 我們在 batch 迴圈中把「已完成 batch 數」存入 _progress_state,
+# 真的被 cancel 時 handler/atexit 會把最新進度 flush 回 sheet,
+# 避免「每 5 批才寫 sheet」的節流造成 resume 重複下單。
+_progress_state = {}
+
+
+def _flush_pending_progress():
+    """把 in-memory 的 batch 進度緊急寫回 sheet(SIGTERM/atexit 呼叫)"""
+    if not _progress_state:
+        return
+    try:
+        _progress_state['ws'].update_cell(
+            _progress_state['row'],
+            _progress_state['col'],
+            f"處理中:{_progress_state['done']}/{_progress_state['total']}",
+        )
+        print(f"[緊急 flush] 列{_progress_state['row']} 寫入 處理中:{_progress_state['done']}/{_progress_state['total']}")
+    except Exception as e:
+        print(f"[緊急 flush 失敗] {e}")
+    _progress_state.clear()
+
+
+def _sigterm_handler(signum, frame):
+    print(f"[SIGTERM] 收到訊號 {signum},緊急 flush 進度後退出")
+    _flush_pending_progress()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, _sigterm_handler)
+atexit.register(_flush_pending_progress)
 
 
 # ─────────────────────────────────────────────
@@ -63,21 +104,45 @@ def send_alert_email(subject: str, body: str):
 # 餘額不足：寄信記錄進度 + 停止 cron
 # ─────────────────────────────────────────────
 
-def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total, ws=None, batch_size=None):
-    """偵測到餘額不足時：寄信告知進度，並停用 cron job
+def _commit_and_push_pause_flag(timestamp, row_num, order_no, remaining_qty):
+    """建立 .paused flag + commit + push,下一輪 workflow 啟動時會立即退出"""
+    try:
+        with open(PAUSE_FLAG_FILE, "w", encoding="utf-8") as f:
+            f.write(
+                f"Paused at {timestamp}\n"
+                f"Row: {row_num}\n"
+                f"Order: #{order_no}\n"
+                f"Remaining qty: {remaining_qty}\n\n"
+                f"充值後請刪除此檔:\n"
+                f"  rm .paused && git commit -am 'resume' && git push\n"
+            )
+        # GitHub Actions 的 GITHUB_TOKEN 已經設定好 push 權限(workflow permissions: contents: write)
+        subprocess.run(["git", "config", "user.email", "bot@swngfog.autoorder"], check=False)
+        subprocess.run(["git", "config", "user.name",  "swngfog-bot"],         check=False)
+        subprocess.run(["git", "add", ".paused"], check=False)
+        subprocess.run(["git", "commit", "-m", f"auto-pause: 餘額不足 列{row_num} #{order_no}"], check=False)
+        r = subprocess.run(["git", "push"], capture_output=True, text=True)
+        if r.returncode == 0:
+            print("  [⛔] 已 commit + push .paused flag,下輪 workflow 會立即退出")
+        else:
+            print(f"  [警告] push .paused 失敗: {r.stderr[:200]}")
+    except Exception as e:
+        print(f"  [警告] 建立 .paused flag 失敗: {e}")
 
-    寄信去重：使用 H 欄(col 8) 當計數器，同一列最多寄 2 封 email。
-    充值恢復後，該列繼續處理成功會覆蓋 I 欄為「完成」；
-    若要重置計數器，可手動清空 H 欄。
+
+def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done, batch_total, ws=None, batch_size=None):
+    """偵測到餘額不足時:寄信告知進度 + 推送 .paused flag 暫停後續 workflow
+
+    寄信去重:使用 H 欄(col 8) 當計數器,同一列最多寄 2 封 email。
+    充值恢復後要人工刪除 .paused + git push,順便手動清空 H 欄。
     """
-    import subprocess
     from datetime import datetime
 
     done_qty = batch_done * (batch_size if batch_size else BATCH_SIZE)
     remaining_qty = qty - done_qty
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── 檢查 email 計數器（H 欄 = col 8）──
+    # ── 檢查 email 計數器(H 欄 = col 8)──
     MAX_EMAILS = 2
     email_col = 8  # H
     should_email = True
@@ -91,63 +156,48 @@ def pause_due_to_balance(row_num, order_no, service_name, igid, qty, batch_done,
                 sent_count = 0
             if sent_count >= MAX_EMAILS:
                 should_email = False
-                print(f"  [⛔ 餘額不足] 列{row_num} 已寄 {sent_count} 封 email（>={MAX_EMAILS}），不再寄")
+                print(f"  [⛔ 餘額不足] 列{row_num} 已寄 {sent_count} 封 email(>={MAX_EMAILS}),不再寄")
             else:
                 new_count = sent_count + 1
         except Exception as e:
-            print(f"  [警告] 讀 H 欄 email 計數失敗：{e}")
+            print(f"  [警告] 讀 H 欄 email 計數失敗:{e}")
 
-    # 1. 寄 email（若未超過上限）
+    # 不論是否寄信,一律 push .paused flag(避免後續 workflow 繼續跑)
+    _commit_and_push_pause_flag(timestamp, row_num, order_no, remaining_qty)
+
     if not should_email:
-        try:
-            subprocess.run(
-                "crontab -l 2>/dev/null | grep -v 'Gsheet_to_fog/run.sh' | crontab -",
-                shell=True, capture_output=True, text=True
-            )
-        except Exception:
-            pass
         return
 
     send_alert_email(
-        subject=f"[swngfog] ⛔ 餘額不足，自動暫停（{timestamp}）",
+        subject=f"[swngfog] ⛔ 餘額不足,自動暫停({timestamp})",
         body=(
-            f"swngfog 餘額不足，自動下單腳本已暫停所有活動。\n\n"
+            f"swngfog 餘額不足,自動下單腳本已暫停所有活動。\n\n"
             f"=== 最後處理進度 ===\n"
-            f"  時間     ：{timestamp}\n"
-            f"  列號     ：第 {row_num} 列\n"
-            f"  訂單號   ：#{order_no}\n"
-            f"  服務     ：{service_name}\n"
-            f"  IGID    ：{igid}\n"
-            f"  原始數量 ：{qty}\n"
-            f"  已下單   ：{done_qty}（{batch_done}/{batch_total} 批）\n"
-            f"  未完成   ：{remaining_qty} 個\n\n"
+            f"  時間     :{timestamp}\n"
+            f"  列號     :第 {row_num} 列\n"
+            f"  訂單號   :#{order_no}\n"
+            f"  服務     :{service_name}\n"
+            f"  IGID    :{igid}\n"
+            f"  原始數量 :{qty}\n"
+            f"  已下單   :{done_qty}({batch_done}/{batch_total} 批)\n"
+            f"  未完成   :{remaining_qty} 個\n\n"
             f"=== 處理步驟 ===\n"
-            f"  1. 請到 swngfog 充值帳戶餘額\n"
-            f"  2. 充值後執行以下指令重新啟動自動排程：\n"
-            f"     (crontab -l; echo '*/5 * * * * /Users/yangkyun-kai/Desktop/Gsheet_to_fog/run.sh') | crontab -\n"
-            f"  3. 或直接執行補單：\n"
-            f"     python3 /Users/yangkyun-kai/Desktop/Gsheet_to_fog/main.py\n"
+            f"  1. 到 swngfog 充值帳戶餘額\n"
+            f"  2. 刪除 .paused flag 讓 workflow 恢復:\n"
+            f"       cd /Users/yangkyun-kai/Desktop/Gsheet_to_fog\n"
+            f"       rm .paused && git commit -am 'resume' && git push\n"
+            f"  3. 下一輪 cron-job.org 觸發時會自動從斷點續跑\n"
         ),
     )
-
-    # 2. 停用 cron（移除含 run.sh 的那行）
-    try:
-        result = subprocess.run(
-            "crontab -l 2>/dev/null | grep -v 'Gsheet_to_fog/run.sh' | crontab -",
-            shell=True, capture_output=True, text=True
-        )
-        print(f"  [⛔] Cron job 已停用")
-    except Exception as e:
-        print(f"  [警告] 停用 cron 失敗：{e}")
 
     # 寫回 H 欄 email 計數
     if ws is not None:
         try:
             ws.update_cell(row_num, email_col, str(new_count))
         except Exception as e:
-            print(f"  [警告] 寫入 H 欄 email 計數失敗：{e}")
+            print(f"  [警告] 寫入 H 欄 email 計數失敗:{e}")
 
-    print(f"  [⛔] 已寄送進度 email（第 {new_count}/{MAX_EMAILS} 封），腳本暫停")
+    print(f"  [⛔] 已寄送進度 email(第 {new_count}/{MAX_EMAILS} 封),腳本暫停")
 
 
 # ─────────────────────────────────────────────
@@ -261,6 +311,18 @@ def process_orders(dry_run: bool = False):
     Args:
         dry_run: True 表示只印出，不實際呼叫 API（測試用）
     """
+    # ── Pause flag 檢查:餘額不足時 pause_due_to_balance 會 commit .paused + push,
+    #    下一輪 workflow checkout 後就會看到這個檔案,立即退出 ──
+    if os.path.exists(PAUSE_FLAG_FILE):
+        print("[⛔ PAUSED] 偵測到 .paused flag,腳本立即退出")
+        print("  → 充值後執行: rm .paused && git commit -am 'resume' && git push")
+        try:
+            with open(PAUSE_FLAG_FILE, "r", encoding="utf-8") as f:
+                print(f"--- .paused 內容 ---\n{f.read()}")
+        except Exception:
+            pass
+        return
+
     print("連接 Google Sheets...")
     gc = get_gspread_client()
     sh = gsheet_retry(lambda: gc.open_by_key(SHEET_ID))
@@ -522,10 +584,19 @@ def process_orders(dry_run: bool = False):
                     print(f"  [成功] 批次{i+1}/{batch_count}（數量:{q_this}） → fog訂單ID:{result.get('order','?')}")
                     total_api_calls += 1
                     api_calls_this_order += 1
-                    # 節流：每 5 批才寫 sheet 一次（減少 API 呼叫），最後一批必寫
+                    # ── SIGTERM-safe 進度追蹤 ──
+                    # 每批都更新 in-memory 進度,workflow 被 cancel 時 handler 會 flush 回 sheet,
+                    # 避免「每 5 批才寫」的節流造成 resume 重複下單。
+                    _progress_state.clear()
+                    _progress_state.update({
+                        'ws': ws, 'row': row_num, 'col': COL_STATUS + 1,
+                        'done': i + 1, 'total': batch_count,
+                    })
+                    # 節流:每 5 批才寫 sheet 一次(減少 API 呼叫),最後一批必寫
                     if (i + 1) % 5 == 0 or (i + 1) == batch_count:
                         try:
                             ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
+                            _progress_state.clear()  # 已 flush,清掉 in-memory 狀態
                         except Exception as ue:
                             print(f"  [警告] 無法更新進度：{ue}")
                 except Exception as e:
@@ -569,6 +640,8 @@ def process_orders(dry_run: bool = False):
         # ── 全部批次成功 → 回寫 I 欄「完成」，並視需要寫 G 欄「AI下單」─
         total_successful = resume_batch + api_calls_this_order
         if not order_failed and total_successful == batch_count:
+            # 本訂單完成,清掉 in-memory 進度(避免 atexit flush 蓋到已經是「完成」的 I 欄)
+            _progress_state.clear()
             if dry_run:
                 print(f"  [DRY RUN] 將列{row_num} I欄更新為「完成」")
                 if row_num >= AI_TAG_START_ROW:
@@ -579,6 +652,12 @@ def process_orders(dry_run: bool = False):
                     print(f"  [✓] 已標記列{row_num} I欄為「完成」")
                 except Exception as e:
                     print(f"  [警告] 無法更新狀態欄：{e}")
+
+                # 重置 H 欄 email 計數器(此列之後若再餘額不足可重新寄信通知)
+                try:
+                    ws.update_cell(row_num, 8, "")
+                except Exception as e:
+                    print(f"  [警告] 無法重置 H 欄 email 計數:{e}")
 
                 if row_num >= AI_TAG_START_ROW:
                     try:
@@ -603,7 +682,6 @@ def process_orders(dry_run: bool = False):
 
 
 if __name__ == "__main__":
-    import sys
     import traceback
 
     dry_run = "--dry-run" in sys.argv
