@@ -49,6 +49,7 @@ SERVICE_BATCH_SIZE = {
 # 比對方式：case-insensitive 完全相符（去除前後空白）
 SKIP_LINKS = {
     "c.chienc",
+    "woow.japan",
 }
 
 # ── 人工處理：遇到這些服務改寄 email，不自動下單 ────────────
