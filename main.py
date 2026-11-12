@@ -610,6 +610,9 @@ def process_orders(dry_run: bool = False):
                             ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
                         except Exception:
                             pass
+                        # 重要:清掉 _progress_state,否則 atexit/SIGTERM 會 flush 舊的
+                        # done=i 狀態把悲觀寫入 i+1 蓋回 i → 重複下單風險
+                        _progress_state.clear()
                         print(f"  [⛔ 餘額不足] 批次{i+1} 可能已下單,寫進度 {i+1}/{batch_count} 避免重複,停止所有活動")
                         pause_due_to_balance(row_num, order_no, service_name, igid, qty, i+1, batch_count, ws=ws, batch_size=batch_size)
                         return  # 立即中止整個流程
