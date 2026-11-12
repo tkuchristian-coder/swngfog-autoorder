@@ -27,6 +27,7 @@ from config import (
     SHEET_ID, SHEET_TAB_NAME,
     START_ROW, SERVICE_MAP, MANUAL_SERVICES, SKIP_LINKS, ALLOWED_SERVICES, SERVICE_BATCH_SIZE,
     COL_ORDER_NO, COL_SERVICE, COL_LINK, COL_QTY, COL_AI_TAG, COL_STATUS,
+    COL_FOG_IDS, COL_DELIVERY,
     BATCH_SIZE, AI_TAG_START_ROW,
     ALERT_EMAIL_TO, ALERT_EMAIL_FROM, ALERT_EMAIL_PASSWORD,
 )
@@ -662,6 +663,7 @@ def process_orders(dry_run: bool = False):
         order_failed = False
         api_calls_this_order = 0
         failed_batches = []   # 收集本訂單失敗批次，最後一封匯總 email
+        fog_order_ids = []    # 本訂單所有 fog 訂單 ID,供 verify_delivery 查交付狀態
 
         # ── 開始前標記「處理中」，防止並行重複執行 / 支援斷點續跑 ──
         if not dry_run and resume_batch == 0:
@@ -678,7 +680,10 @@ def process_orders(dry_run: bool = False):
             else:
                 try:
                     result = place_order(service_id, igid, q_this)
-                    print(f"  [成功] 批次{i+1}/{batch_count}（數量:{q_this}） → fog訂單ID:{result.get('order','?')}")
+                    oid = result.get('order', '?')
+                    print(f"  [成功] 批次{i+1}/{batch_count}（數量:{q_this}） → fog訂單ID:{oid}")
+                    if oid and oid != '?':
+                        fog_order_ids.append(str(oid))
                     total_api_calls += 1
                     api_calls_this_order += 1
                     # ── SIGTERM-safe 進度追蹤 ──
@@ -765,6 +770,15 @@ def process_orders(dry_run: bool = False):
                     ws.update_cell(row_num, 8, "")
                 except Exception as e:
                     print(f"  [警告] 無法重置 H 欄 email 計數:{e}")
+
+                # 寫 J 欄: fog 訂單 ID 範圍(供 verify_delivery.py 查交付狀態)
+                if fog_order_ids:
+                    j_val = (f"{fog_order_ids[0]}-{fog_order_ids[-1]}"
+                             if len(fog_order_ids) > 1 else fog_order_ids[0])
+                    try:
+                        ws.update_cell(row_num, COL_FOG_IDS + 1, j_val)
+                    except Exception as e:
+                        print(f"  [警告] 無法寫 J 欄 fog IDs:{e}")
 
                 if row_num >= AI_TAG_START_ROW:
                     try:

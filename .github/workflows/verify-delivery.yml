@@ -1,0 +1,36 @@
+name: verify delivery
+
+on:
+  schedule:
+    - cron: '15,45 * * * *'   # 每小時的 15、45 分跑(錯開 auto-order 的 0/10/20/30/40/50)
+  workflow_dispatch:
+
+concurrency:
+  group: verify-delivery
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decode credentials.json
+        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" | base64 --decode > credentials.json
+
+      - name: Run verify_delivery
+        env:
+          SWNGFOG_API_KEY: ${{ secrets.SWNGFOG_API_KEY }}
+        run: python verify_delivery.py

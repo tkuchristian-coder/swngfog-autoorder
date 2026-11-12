@@ -75,7 +75,9 @@ COL_SERVICE  = 1   # B欄：服務類型
 COL_LINK     = 2   # C欄：IG連結/IGID
 COL_QTY      = 3   # D欄：數量
 COL_AI_TAG   = 6   # G欄：AI下單標記
-COL_STATUS   = 8   # I欄：狀態（"完成" 表示跳過）
+COL_STATUS   = 8   # I欄：下單狀態(main.py 寫入:等待處理/處理中/完成/已通知人工)
+COL_FOG_IDS  = 9   # J欄：fog 訂單 ID 記錄(first-last 範圍,供 verify 查交付)
+COL_DELIVERY = 10  # K欄：實際交付狀態(verify_delivery.py 寫入:已到帳/派送中:X%/異常)
 
 # 從哪一行起才寫 AI下單 標記（G欄）
 AI_TAG_START_ROW = 818
