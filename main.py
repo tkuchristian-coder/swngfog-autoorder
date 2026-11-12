@@ -34,6 +34,12 @@ from config import (
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "credentials.json")
 PAUSE_FLAG_FILE  = os.path.join(os.path.dirname(__file__), ".paused")
 
+# ─── Auto-resume 設定 ───────────────────────────────────────
+# .paused 存在時,若查到 swngfog 餘額 >= 門檻,自動 resume(每天上限 N 次,避免 loop)
+AUTO_RESUME_COUNT_FILE        = os.path.join(os.path.dirname(__file__), ".auto_resume_count")
+AUTO_RESUME_BALANCE_THRESHOLD = 5.0   # USD,高於此才自動 resume
+AUTO_RESUME_MAX_PER_DAY       = 3     # 一天最多 auto-resume 次數
+
 
 # ─────────────────────────────────────────────
 # SIGTERM-safe 進度 flush
@@ -103,6 +109,92 @@ def send_alert_email(subject: str, body: str):
 # ─────────────────────────────────────────────
 # 餘額不足：寄信記錄進度 + 停止 cron
 # ─────────────────────────────────────────────
+
+def query_swngfog_balance():
+    """查 swngfog 餘額。成功回 float (USD),失敗回 None"""
+    try:
+        resp = requests.post(SWNGFOG_API_URL, data={
+            "key": SWNGFOG_API_KEY, "action": "balance",
+        }, timeout=15)
+        resp.raise_for_status()
+        j = resp.json()
+        bal = j.get("balance")
+        if bal is None:
+            return None
+        return float(bal)
+    except Exception as e:
+        print(f"  [balance 查詢失敗] {e}")
+        return None
+
+
+def _read_auto_resume_count():
+    """讀 .auto_resume_count 回 (today_str, count_today)"""
+    from datetime import date
+    today = date.today().isoformat()
+    try:
+        with open(AUTO_RESUME_COUNT_FILE, "r", encoding="utf-8") as f:
+            line = f.read().strip()
+            d, c = line.split(":")
+            if d == today:
+                return today, int(c)
+    except Exception:
+        pass
+    return today, 0
+
+
+def _write_auto_resume_count(today, count):
+    try:
+        with open(AUTO_RESUME_COUNT_FILE, "w", encoding="utf-8") as f:
+            f.write(f"{today}:{count}")
+    except Exception as e:
+        print(f"  [寫入 auto_resume_count 失敗] {e}")
+
+
+def _try_auto_resume():
+    """.paused 存在時嘗試自動 resume。
+    回 True = 已刪 .paused + push,可繼續處理
+    回 False = 仍 pause,呼叫端應 return 退出
+    """
+    today, count = _read_auto_resume_count()
+    if count >= AUTO_RESUME_MAX_PER_DAY:
+        print(f"[auto-resume] 今日已達上限 {count}/{AUTO_RESUME_MAX_PER_DAY} 次,不自動 resume")
+        return False
+
+    balance = query_swngfog_balance()
+    if balance is None:
+        print(f"[auto-resume] 無法查 swngfog 餘額,維持 pause")
+        return False
+    print(f"[auto-resume] 偵測餘額 ${balance:.2f} (門檻 ${AUTO_RESUME_BALANCE_THRESHOLD})")
+    if balance < AUTO_RESUME_BALANCE_THRESHOLD:
+        print(f"[auto-resume] 餘額不足門檻,維持 pause")
+        return False
+
+    new_count = count + 1
+    _write_auto_resume_count(today, new_count)
+    try:
+        os.remove(PAUSE_FLAG_FILE)
+        subprocess.run(["git", "config", "user.email", "bot@swngfog.autoorder"], check=False)
+        subprocess.run(["git", "config", "user.name",  "swngfog-bot"],         check=False)
+        subprocess.run(["git", "add", ".paused", AUTO_RESUME_COUNT_FILE], check=False)
+        subprocess.run(["git", "commit", "-m",
+            f"auto-resume: 餘額 ${balance:.2f} (今日第 {new_count}/{AUTO_RESUME_MAX_PER_DAY} 次)"
+        ], check=False)
+        r = subprocess.run(["git", "push"], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"[auto-resume] push 失敗: {r.stderr[:200]}")
+            return False
+    except Exception as e:
+        print(f"[auto-resume] 失敗: {e}")
+        return False
+
+    print(f"[auto-resume] ✓ 已解除 pause (餘額 ${balance:.2f}),繼續處理")
+    send_alert_email(
+        subject=f"[swngfog] 🔄 Auto-resume (餘額 ${balance:.2f})",
+        body=(f"偵測到 swngfog 餘額 ${balance:.2f} ≥ 門檻 ${AUTO_RESUME_BALANCE_THRESHOLD},"
+              f"自動解除 pause。\n今日第 {new_count}/{AUTO_RESUME_MAX_PER_DAY} 次 auto-resume。"),
+    )
+    return True
+
 
 def _commit_and_push_pause_flag(timestamp, row_num, order_no, remaining_qty):
     """建立 .paused flag + commit + push,下一輪 workflow 啟動時會立即退出"""
@@ -311,17 +403,22 @@ def process_orders(dry_run: bool = False):
     Args:
         dry_run: True 表示只印出，不實際呼叫 API（測試用）
     """
-    # ── Pause flag 檢查:餘額不足時 pause_due_to_balance 會 commit .paused + push,
-    #    下一輪 workflow checkout 後就會看到這個檔案,立即退出 ──
+    # ── Pause flag 檢查 ───────────────────────────────────────
+    # pause_due_to_balance 會 commit .paused + push,下輪 workflow 讀到就退出。
+    # 但現在加 auto-resume: 若 .paused 存在且 swngfog 餘額 >= 門檻,自動刪掉 .paused
+    # (每日最多 N 次,避免 balance 剛好勉強夠的 loop)。
     if os.path.exists(PAUSE_FLAG_FILE):
-        print("[⛔ PAUSED] 偵測到 .paused flag,腳本立即退出")
-        print("  → 充值後執行: rm .paused && git commit -am 'resume' && git push")
+        print("[⛔ PAUSED] 偵測到 .paused flag")
         try:
             with open(PAUSE_FLAG_FILE, "r", encoding="utf-8") as f:
                 print(f"--- .paused 內容 ---\n{f.read()}")
         except Exception:
             pass
-        return
+        if _try_auto_resume():
+            print("[auto-resume] 繼續執行處理流程...\n")
+        else:
+            print("  → 人工充值後執行: rm .paused && git commit -am 'resume' && git push")
+            return
 
     print("連接 Google Sheets...")
     gc = get_gspread_client()
