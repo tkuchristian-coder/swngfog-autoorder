@@ -485,19 +485,28 @@ def process_orders(dry_run: bool = False):
             continue
 
         # ── 防手動移列 race ──────────────────────────────────
-        # all_rows 是 run 開始時的快照;若使用者 run 中手動移列,快照的 row_num 已失效,
-        # 直接 ws.update_cell(row_num,...) 會寫到錯列。這裡用 A 欄訂單號在 live sheet
-        # 重新找實際 row,之後所有寫入都用這個 row_num。
+        # all_rows 是 run 開始時的快照;若使用者 run 中手動移列/刪列,快照 row_num 已失效,
+        # 直接 ws.update_cell(row_num,...) 會寫到錯列。用 A 欄訂單號在 live sheet 重新找實際 row。
+        #   found=None 且有 order_no → 列被刪了,跳過該列不寫(防寫到錯列)
+        #   found.row != row_num → 列被移了,改用實際列號
+        #   order_no 為空 → 無法 resolve,只能用 cached row_num (警告 best-effort)
         if order_no:
             try:
                 found = ws.find(order_no, in_column=1)
-                if found and found.row != row_num:
+                if found is None:
+                    print(f"  [⚠️ row 消失] 列{row_num} #{order_no} 在 live sheet 找不到(可能被刪),跳過不寫")
+                    continue
+                if found.row != row_num:
                     print(f"  [⚠️ row 遷移] 列{row_num} #{order_no} 實際在列 {found.row},改用實際列號回寫")
                     row_num = found.row
             except APIError as e:
-                print(f"  [警告] 查訂單號 #{order_no} 失敗,維持快照 row_num={row_num}: {e}")
+                print(f"  [警告] 查訂單號 #{order_no} 失敗,跳過該列(防寫錯): {e}")
+                continue
             except Exception as e:
-                print(f"  [警告] 查訂單號 #{order_no} 失敗,維持快照 row_num={row_num}: {e}")
+                print(f"  [警告] 查訂單號 #{order_no} 失敗,跳過該列(防寫錯): {e}")
+                continue
+        else:
+            print(f"  [⚠️ 無訂單號] 列{row_num} 無 A 欄訂單號可 resolve,用快照 row_num (若已移列可能寫錯)")
 
         # ── 讚類服務全部改寄 email,不自動下單 ───────────────────
         # 比對規則:服務名稱含「讚」字就改寄 email(涵蓋 台灣讚/台灣自動讚/真人讚/台港華人讚/頂級讚…)
