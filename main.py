@@ -484,6 +484,21 @@ def process_orders(dry_run: bool = False):
         if status.strip() == "已通知人工":
             continue
 
+        # ── 防手動移列 race ──────────────────────────────────
+        # all_rows 是 run 開始時的快照;若使用者 run 中手動移列,快照的 row_num 已失效,
+        # 直接 ws.update_cell(row_num,...) 會寫到錯列。這裡用 A 欄訂單號在 live sheet
+        # 重新找實際 row,之後所有寫入都用這個 row_num。
+        if order_no:
+            try:
+                found = ws.find(order_no, in_column=1)
+                if found and found.row != row_num:
+                    print(f"  [⚠️ row 遷移] 列{row_num} #{order_no} 實際在列 {found.row},改用實際列號回寫")
+                    row_num = found.row
+            except APIError as e:
+                print(f"  [警告] 查訂單號 #{order_no} 失敗,維持快照 row_num={row_num}: {e}")
+            except Exception as e:
+                print(f"  [警告] 查訂單號 #{order_no} 失敗,維持快照 row_num={row_num}: {e}")
+
         # ── 讚類服務全部改寄 email,不自動下單 ───────────────────
         # 比對規則:服務名稱含「讚」字就改寄 email(涵蓋 台灣讚/台灣自動讚/真人讚/台港華人讚/頂級讚…)
         # 必須在白名單過濾前,避免被靜默跳過
