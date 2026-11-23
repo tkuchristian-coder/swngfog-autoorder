@@ -1,7 +1,0 @@
-Paused at 2026-11-23 04:29:21
-Row: 8832
-Order: #169506
-Remaining qty: 220
-
-充值後請刪除此檔:
-  rm .paused && git commit -am 'resume' && git push
