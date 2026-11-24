@@ -51,18 +51,37 @@ AUTO_RESUME_MAX_PER_DAY       = 3     # 一天最多 auto-resume 次數
 # 避免「每 5 批才寫 sheet」的節流造成 resume 重複下單。
 _progress_state = {}
 
+# log 逐行輸出(被 cancel 時才不會遺失最後的 log)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# ── 執行時間預算 ──
+# workflow timeout-minutes=30,超時會被強制砍掉(來不及 flush → resume 重複下單,
+# 2026-11-22 cutemo.love.disney 多下 3 批即此原因)。
+# 超過此預算就不再送新批次,寫回精確進度後正常結束,下一輪接續。
+RUN_TIME_BUDGET_SEC = 22 * 60
+_RUN_START = time.time()
+
+
+def _time_budget_exceeded():
+    return time.time() - _RUN_START > RUN_TIME_BUDGET_SEC
+
 
 def _flush_pending_progress():
-    """把 in-memory 的 batch 進度緊急寫回 sheet(SIGTERM/atexit 呼叫)"""
+    """把 in-memory 的 batch 進度緊急寫回 sheet(SIGTERM/atexit 呼叫)
+    若有請求正在送出中(inflight),悲觀地當作已下單 (+1),避免 resume 重複。"""
     if not _progress_state:
         return
     try:
+        done = _progress_state['done'] + (1 if _progress_state.get('inflight') else 0)
         _progress_state['ws'].update_cell(
             _progress_state['row'],
             _progress_state['col'],
-            f"處理中:{_progress_state['done']}/{_progress_state['total']}",
+            f"處理中:{done}/{_progress_state['total']}",
         )
-        print(f"[緊急 flush] 列{_progress_state['row']} 寫入 處理中:{_progress_state['done']}/{_progress_state['total']}")
+        print(f"[緊急 flush] 列{_progress_state['row']} 寫入 處理中:{done}/{_progress_state['total']}", flush=True)
     except Exception as e:
         print(f"[緊急 flush 失敗] {e}")
     _progress_state.clear()
@@ -696,12 +715,29 @@ def process_orders(dry_run: bool = False):
             except Exception as e:
                 print(f"  [警告] 無法寫入處理中狀態：{e}")
 
+        stopped_by_budget = False
         for i in range(resume_batch, batch_count):
             q_this = batches[i]
             if dry_run:
                 print(f"  [DRY RUN] service={service_id} link={igid} quantity={q_this}")
                 api_calls_this_order += 1
             else:
+                # ── 時間預算:快撞 workflow 上限前主動停,寫精確進度(不會被砍) ──
+                if _time_budget_exceeded():
+                    try:
+                        ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i}/{batch_count}")
+                        _progress_state.clear()
+                    except Exception as ue:
+                        print(f"  [警告] 時間預算停止時寫進度失敗(atexit 會再試):{ue}")
+                    print(f"  [⏱ 時間預算] 已跑 {int(time.time()-_RUN_START)}s,停在 {i}/{batch_count},下一輪接續", flush=True)
+                    stopped_by_budget = True
+                    break
+                # 標記 inflight:若此時被砍,flush 會悲觀 +1(視為已下單)
+                _progress_state.clear()
+                _progress_state.update({
+                    'ws': ws, 'row': row_num, 'col': COL_STATUS + 1,
+                    'done': i, 'total': batch_count, 'inflight': True,
+                })
                 try:
                     result = place_order(service_id, igid, q_this)
                     oid = result.get('order', '?')
@@ -716,7 +752,7 @@ def process_orders(dry_run: bool = False):
                     _progress_state.clear()
                     _progress_state.update({
                         'ws': ws, 'row': row_num, 'col': COL_STATUS + 1,
-                        'done': i + 1, 'total': batch_count,
+                        'done': i + 1, 'total': batch_count, 'inflight': False,
                     })
                     # 節流:每 5 批才寫 sheet 一次(減少 API 呼叫),最後一批必寫
                     if (i + 1) % 5 == 0 or (i + 1) == batch_count:
@@ -742,7 +778,31 @@ def process_orders(dry_run: bool = False):
                         print(f"  [⛔ 餘額不足] 批次{i+1} 可能已下單,寫進度 {i+1}/{batch_count} 避免重複,停止所有活動")
                         pause_due_to_balance(row_num, order_no, service_name, igid, qty, i+1, batch_count, ws=ws, batch_size=batch_size)
                         return  # 立即中止整個流程
-                    # ── 其他錯誤(非 balance) → 寫 i (未算成功),可 resume 重試 ──
+                    # ── 逾時 / 連線中斷 / 5xx → 結果不明,swngfog 可能已收單 ──
+                    # 悲觀當作已下單(進度 i+1),不重試,寧可少 10 粉也不重複下單。
+                    ambiguous = isinstance(e, (requests.exceptions.Timeout,
+                                               requests.exceptions.ConnectionError)) or (
+                        isinstance(e, requests.exceptions.HTTPError)
+                        and e.response is not None and e.response.status_code >= 500)
+                    if ambiguous:
+                        _progress_state.clear()
+                        _progress_state.update({
+                            'ws': ws, 'row': row_num, 'col': COL_STATUS + 1,
+                            'done': i + 1, 'total': batch_count, 'inflight': False,
+                        })
+                        try:
+                            ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i+1}/{batch_count}")
+                            _progress_state.clear()
+                        except Exception:
+                            pass
+                        print(f"  [⚠️ 結果不明] 批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg} → 視為已下單,不重試", flush=True)
+                        failed_batches.append(f"批次{i+1}/{batch_count}（數量:{q_this}）結果不明(視為已下,未重試)：{err_msg}")
+                        order_failed = True
+                        time.sleep(0.2)
+                        continue
+                    # ── 明確錯誤(API 回 error / 4xx) → 確定沒下,進度維持 i,可 resume 重試 ──
+                    # 不讓 in-memory 進度停在 inflight 狀態(否則 flush 會誤 +1)
+                    _progress_state['inflight'] = False
                     try:
                         ws.update_cell(row_num, COL_STATUS + 1, f"處理中:{i}/{batch_count}")
                     except Exception:
@@ -751,6 +811,9 @@ def process_orders(dry_run: bool = False):
                     failed_batches.append(f"批次{i+1}/{batch_count}（數量:{q_this}）：{err_msg}")
                     order_failed = True
                 time.sleep(0.2)
+
+        if stopped_by_budget:
+            break  # 不再處理後面的列,交給下一輪
 
         # ── 部分/全部失敗 → 一封匯總 email ──────────────────────
         if order_failed and failed_batches:
